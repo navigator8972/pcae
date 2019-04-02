@@ -164,10 +164,13 @@ class PointCloudGenerativeGMM(nn.Module):
         z = self.gmm.sample(n_samples=n_samples)
         return self.auto_encoder.decode(z)
     
-    def fit_shapes(self, input_shapes, n_iters=10, lr=.1, verbose=False):
+    def fit_shapes(self, input_shapes, n_iters=10, lr=.1, ll_weight=5., init_from_input=True, verbose=False):
         #find latent variable leading to reconstructions that: 1. map input shapes with a small one-directional chamfer loss; 2. maximize the likelihood of GMM
 
-        encode_z = self.auto_encoder.encode(input_shapes)[0]
+        if init_from_input:
+            encode_z = self.auto_encoder.encode(input_shapes)[0]
+        else:
+            encode_z = self.gmm.sample(n_samples=input_shapes.shape[0])
         encode_z = Variable(encode_z, requires_grad=True)
         
         #grad,  = torch.autograd.grad(tol_loss, encode_z, create_graph=True)
@@ -178,7 +181,7 @@ class PointCloudGenerativeGMM(nn.Module):
             decode_x = self.auto_encoder.decode(encode_z)
             loss_input_to_decode, _ = chamfer_distance_with_batch(input_shapes, decode_x)     #this allows small cost when decoded_x contains input_shapes
             gmm_likelikelihood = self.gmm.likelihood(encode_z)
-            tol_loss = loss_input_to_decode.sum() - 5.* gmm_likelikelihood.sum()
+            tol_loss = loss_input_to_decode.sum() - ll_weight* gmm_likelikelihood.sum()
             if verbose:
                 print('Iteration {} - Reconstruction Loss/GMM Likelihood: {}/{}'.format(i+1, loss_input_to_decode.sum().item(), gmm_likelikelihood.sum().item()))
             solver.zero_grad()
@@ -188,41 +191,55 @@ class PointCloudGenerativeGMM(nn.Module):
         return self.auto_encoder.decode(encode_z)
 
 class PointCloudDataSet(Dataset):
-    def __init__(self, npz_file, feature_fname='chair', norm=True, train=True):
-        # self.voxels = np.reshape(np.load(npz_file)[feature_fname].astype(np.float32), (-1, 1, voxel_dim, voxel_dim, voxel_dim))
-        full_data = np.load(npz_file)['data'].item()[feature_fname].astype(np.float32)
-        if train:
-            self.pc_data = full_data[:int(full_data.shape[0]*.8)]
+    def __init__(self, npz_file, feature_fname='chair', norm=True, train=True, float_type=np.float32):
+        if isinstance(feature_fname, str):
+            full_data = np.load(npz_file)['data'].item()[feature_fname].astype(float_type)
+            if train:
+                self.pc_data = full_data[:int(full_data.shape[0]*.8)]
+            else:
+                self.pc_data = full_data[int(full_data.shape[0]*.8):]
+        elif isinstance(feature_fname, list):
+            full_data = np.load(npz_file)['data'].item()
+            if train:
+                self.pc_data = np.concatenate([full_data[k][:int(full_data[k].shape[0]*.8)].astype(float_type) for k in feature_fname], axis=0)
+            else:
+                self.pc_data = np.concatenate([full_data[k][int(full_data[k].shape[0]*.8):].astype(float_type) for k in feature_fname], axis=0)
         else:
-            self.pc_data = full_data[int(full_data.shape[0]*.8):]
-        
-        # if len(self.voxels.shape) == 2:
-        #     #need to reshape...
-        #     self.voxels = np.reshape(self.voxels, (-1, 1, voxel_dim, voxel_dim, voxel_dim))
-        # if norm:
-        #     #normalized to [-1, 1]
-        #     self.voxels = 2*self.voxels-1
+            raise NotImplementedError
+
         return 
         
     def __len__(self):
         return len(self.pc_data)
 
     def __getitem__(self, idx):
-        # stretch the voxel representation to alleviate gradient vanishing problem of logarithm function, similar trick from https://arxiv.org/pdf/1608.04236.pdf
-        # is that really necessary?
-        # return self.voxels[idx] * 3 - 1     
         return self.pc_data[idx]
 
 if __name__ == '__main__':
-    model = PointCloudAutoEncoder(n_points=2048, latent_size=8)
+    # model = PointCloudAutoEncoder(n_points=2048, latent_size=8)
+    # if torch.cuda.is_available():
+    #     model.cuda()
+    
+    # # dummy_data = torch.randn(8, 3, 2048).to(device)
+    # # x_hat, z, trans = model(dummy_data)
+    # # reconstruction_loss = model.reconstruction_loss(dummy_data, x_hat)
+    # #dataset
+    # dataset = PointCloudDataSet('../data/3DShapeNet_PointCloud2048.npz')
+    # print('Number of data:{}'.format(len(dataset)))
+
+    # model.fit(dataset, batch_size=32)
+
+    model = PointCloudAutoEncoder(n_points=1024, latent_size=8)
     if torch.cuda.is_available():
         model.cuda()
-    
-    # dummy_data = torch.randn(8, 3, 2048).to(device)
-    # x_hat, z, trans = model(dummy_data)
-    # reconstruction_loss = model.reconstruction_loss(dummy_data, x_hat)
-    #dataset
-    dataset = PointCloudDataSet('../data/3DShapeNet_PointCloud2048.npz')
+    #dataset = PointCloudDataSet('../data/ycb_18_dataset.npz', feature_fname='play_go_rainbow_stakin_cups_1_yellow')
+    ycb_objs = ['black_and_decker_lithium_drill_driver', 'campbells_condensed_tomato_soup',
+                'domino_sugar_1lb', 'morton_salt_shaker', 'rubbermaid_ice_guard_pitcher_blue', 'block_of_wood_6in',
+                'cheerios_14oz', 'frenchs_classic_yellow_mustard_14oz', 'play_go_rainbow_stakin_cups_1_yellow',
+                'soft_scrub_2lb_4oz', 'brine_mini_soccer_ball', 'clorox_disinfecting_wipes_35', 'melissa_doug_farm_fresh_fruit_banana',
+                'play_go_rainbow_stakin_cups_2_orange', 'sponge_with_textured_cover', 'comet_lemon_fresh_bleach',
+                'melissa_doug_farm_fresh_fruit_lemon', 'pringles_original']
+    dataset = PointCloudDataSet('../data/ycb_18_dataset.npz', feature_fname=ycb_objs)   #train over all the types
     print('Number of data:{}'.format(len(dataset)))
 
     model.fit(dataset, batch_size=32)
